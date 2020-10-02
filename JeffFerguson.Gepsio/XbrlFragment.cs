@@ -46,6 +46,8 @@ namespace JeffFerguson.Gepsio
     /// </remarks>
     public class XbrlFragment
     {
+        private LinkbaseDocumentCollection thisLinkbaseDocuments;
+
         /// <summary>
         /// The delegate used to handle events fired by the class.
         /// </summary>
@@ -154,11 +156,11 @@ namespace JeffFerguson.Gepsio
             this.Schemas = new XbrlSchemaCollection();
             this.ValidationErrors = new List<ValidationError>();
             CreateNamespaceManager();
-
             //---------------------------------------------------------------------------
             // Load.
             //---------------------------------------------------------------------------
             ReadSchemaLocationAttributes();
+            ReadLinkbaseReferences();
             ReadTaxonomySchemaReferences();
             ReadTaxonomySchemaImports();
             ReadRoleReferences();
@@ -167,14 +169,13 @@ namespace JeffFerguson.Gepsio
             ReadUnits();
             ReadFacts();
             ReadFootnoteLinks();
-            if (Loaded != null) Loaded(this, null);
-
+            Loaded?.Invoke(this, null);
             //---------------------------------------------------------------------------
             // Validate.
             //---------------------------------------------------------------------------
             var validator = new Xbrl2Dot1Validator();
             validator.Validate(this);
-            if (Validated != null) Validated(this, null);
+            Validated?.Invoke(this, null);
         }
 
         internal void AddValidationError(ValidationError validationError)
@@ -285,7 +286,7 @@ namespace JeffFerguson.Gepsio
                 return null;
             if (Uri.Length == 0)
                 return null;
-            return this.Schemas.GetSchemaFromTargetNamespace(Uri);
+            return this.Schemas.GetSchemaFromTargetNamespace(Uri, this);
         }
 
         /// <summary>
@@ -340,45 +341,29 @@ namespace JeffFerguson.Gepsio
         /// </summary>
         private void ReadSchemaLocationAttributes()
         {
-            foreach (IAttribute currentAttribute in this.XbrlRootNode.Attributes)
-            {
-                if (currentAttribute.NamespaceURI.Equals(XbrlSchema.XmlSchemaInstanceNamespaceUri) && currentAttribute.LocalName.Equals("schemaLocation"))
-                {
-                    var attributeValue = currentAttribute.Value.Trim();
-                    if (!string.IsNullOrEmpty(attributeValue))
-                        ProcessSchemaLocationAttributeValue(attributeValue);
-                }
-            }
+            SchemaLocationAttributeProcessor.Process(this.XbrlRootNode, this);
         }
 
         /// <summary>
-        /// Process a value found in a schemaLocation attribute.
+        /// Read any linkbase references contained directly in the fragment.
         /// </summary>
         /// <remarks>
-        /// This string is formatted as a set of whitespace-delimited pairs. The first URI reference in each pair is a namespace name,
-        /// and the second is the location of a schema that describes that namespace.
+        /// Linkbase references found as children of XBRL elements is allowed by section
+        /// 4.3 of the XBRL specification.
         /// </remarks>
-        /// <param name="schemaLocationAttributeValue">
-        /// The value of a schemaLocation attribute.
-        /// </param>
-        private void ProcessSchemaLocationAttributeValue(string schemaLocationAttributeValue)
+        private void ReadLinkbaseReferences()
         {
-            var NamespacesAndLocations = schemaLocationAttributeValue.Split(new char[0], StringSplitOptions.RemoveEmptyEntries);
-            for(var index = 0; index < NamespacesAndLocations.Length; index += 2)
-            {
-                ProcessSchemaNamespaceAndLocation(NamespacesAndLocations[index], NamespacesAndLocations[index + 1]);
-            }
+            thisLinkbaseDocuments = new LinkbaseDocumentCollection();
+            thisLinkbaseDocuments.ReadLinkbaseReferences(this.XbrlRootNode.BaseURI, this.XbrlRootNode);
         }
 
         private void ProcessSchemaNamespaceAndLocation(string schemaNamespace, string schemaLocation)
         {
             var newSchema = new XbrlSchema(this, schemaLocation, string.Empty);
-            if (newSchema.SchemaRootNode != null)
-            {
-                if (newSchema.TargetNamespace == null)
-                    newSchema.TargetNamespace = schemaNamespace;
-                AddSchemaToSchemaList(newSchema);
-            }
+            if (newSchema.SchemaRootNode == null) return;
+
+            newSchema.TargetNamespace ??= schemaNamespace;
+            AddSchemaToSchemaList(newSchema);
         }
 
         /// <summary>
@@ -403,11 +388,14 @@ namespace JeffFerguson.Gepsio
         /// </summary>
         private void ReadTaxonomySchemaReferences()
         {
-            string linkbaseNamespacePrefix = thisNamespaceManager.LookupPrefix(XbrlDocument.XbrlLinkbaseNamespaceUri);
-            string xPathExpression = string.Format("//{0}:schemaRef", linkbaseNamespacePrefix);
-            INodeList schemaRefNodes = this.XbrlRootNode.SelectNodes(xPathExpression, thisNamespaceManager);
-            foreach (INode schemaRefNode in schemaRefNodes)
-                ReadTaxonomySchemaReference(schemaRefNode);
+            var LinkbaseNamespacePrefix = thisNamespaceManager.LookupPrefix(XbrlDocument.XbrlLinkbaseNamespaceUri);
+            var XPathExpressionBuilder = new StringBuilder();
+            XPathExpressionBuilder.AppendFormat("//{0}:schemaRef", LinkbaseNamespacePrefix);
+
+            var XPathExpression = XPathExpressionBuilder.ToString();
+            var SchemaRefNodes = this.XbrlRootNode.SelectNodes(XPathExpression, thisNamespaceManager);
+            foreach (INode SchemaRefNode in SchemaRefNodes)
+                ReadTaxonomySchemaReference(SchemaRefNode);
         }
 
         private void ReadTaxonomySchemaImports()
@@ -427,16 +415,16 @@ namespace JeffFerguson.Gepsio
         private int ReadTaxonomySchemaImport(XbrlSchema schema)
         {
             int count = 0;
-            string xmlSchemaPrefix = schema.NamespaceManager.LookupPrefix(XbrlSchema.XmlSchemaNamespaceUri);
-            string xpathExpression = string.Format("//{0}:import", xmlSchemaPrefix);
-            INodeList schemaImportNodes = schema.SchemaRootNode.SelectNodes(xpathExpression, schema.NamespaceManager);
+            var xmlSchemaPrefix = schema.NamespaceManager.LookupPrefix(XbrlSchema.XmlSchemaNamespaceUri);
+            var xpathExpression = string.Format("//{0}:import", xmlSchemaPrefix);
+            var schemaImportNodes = schema.SchemaRootNode.SelectNodes(xpathExpression, schema.NamespaceManager);
             foreach (INode schemaImportNode in schemaImportNodes)
             {
-                string schemaNamespace = schemaImportNode.GetAttributeValue("namespace");
+                var schemaNamespace = schemaImportNode.GetAttributeValue("namespace");
                 if (Schemas.SchemaList.Any(currentSchema => currentSchema.TargetNamespace == schemaNamespace)) continue;
 
-                string schemaLocation = schemaImportNode.GetAttributeValue("schemaLocation");
-                string schemaFullLocation = GetFullSchemaPath(schema.Path, schemaLocation, string.Empty);
+                var schemaLocation = schemaImportNode.GetAttributeValue("schemaLocation");
+                var schemaFullLocation = GetFullSchemaPath(schema.LoadPath, schemaLocation, string.Empty);
                 ProcessSchemaNamespaceAndLocation(schemaNamespace, schemaFullLocation);
                 count++;
             }
@@ -450,19 +438,21 @@ namespace JeffFerguson.Gepsio
             if (lowerCaseSchemaFilename.StartsWith("http://") ||
                 lowerCaseSchemaFilename.StartsWith("https://") ||
                 lowerCaseSchemaFilename.StartsWith("file://"))
+            {
                 return schemaFilename;
+            }
 
             string fullPath;
-            int firstPathSeparator = schemaFilename.IndexOf(Path.DirectorySeparatorChar);
+            var firstPathSeparator = schemaFilename.IndexOf(Path.DirectorySeparatorChar);
             if (firstPathSeparator == -1 && !string.IsNullOrEmpty(schemaPath))
             {
-                int lastPathSeparator = schemaPath.LastIndexOf(Path.DirectorySeparatorChar);
+                var lastPathSeparator = schemaPath.LastIndexOf(Path.DirectorySeparatorChar);
                 if (lastPathSeparator == -1)
                     lastPathSeparator = schemaPath.LastIndexOf('/');
 
-                string documentPath = schemaPath.Substring(0, lastPathSeparator + 1);
+                var documentPath = schemaPath.Substring(0, lastPathSeparator + 1);
                 if (!string.IsNullOrEmpty(baseDirectory))
-                    documentPath = documentPath + baseDirectory;
+                    documentPath += baseDirectory;
                 fullPath = documentPath + schemaFilename;
             }
             else
@@ -505,7 +495,7 @@ namespace JeffFerguson.Gepsio
         private void ReadTaxonomySchemaReference(INode SchemaRefNode)
         {
             string HrefAttributeValue = SchemaRefNode.GetAttributeValue(Xlink.XlinkNode.xlinkNamespace, "href");
-            string Base = SchemaRefNode.GetAttributeValue(XbrlDocument.XmlNamespaceUri, "base");
+            string Base = SchemaRefNode.GetAttributeValue(XbrlDocument.XmlNamespaceUri1998, "base");
             var newSchema = new XbrlSchema(this, HrefAttributeValue, Base);
             if(newSchema.SchemaRootNode != null)
                 AddSchemaToSchemaList(newSchema);
@@ -557,8 +547,10 @@ namespace JeffFerguson.Gepsio
         /// </remarks>
         private void ReadFacts()
         {
-            this.Facts = new FactCollection();
-            this.Facts.Capacity = this.XbrlRootNode.ChildNodes.Count;
+            this.Facts = new FactCollection
+            {
+                Capacity = this.XbrlRootNode.ChildNodes.Count
+            };
             foreach (INode CurrentChild in this.XbrlRootNode.ChildNodes)
             {
                 var CurrentFact = Fact.Create(this, CurrentChild);
@@ -566,16 +558,6 @@ namespace JeffFerguson.Gepsio
                     this.Facts.Add(CurrentFact);
             }
             this.Facts.TrimExcess();
-        }
-
-        //-------------------------------------------------------------------------------
-        //-------------------------------------------------------------------------------
-        private bool IsTaxonomyNamespace(string CandidateNamespace)
-        {
-            var matchingSchema = this.Schemas.GetSchemaFromTargetNamespace(CandidateNamespace);
-            if (matchingSchema == null)
-                return false;
-            return true;
         }
 
         //-------------------------------------------------------------------------------
@@ -620,18 +602,81 @@ namespace JeffFerguson.Gepsio
             return false;
         }
 
-        //-------------------------------------------------------------------------------
-        //-------------------------------------------------------------------------------
-        private Item LocateFact(Locator FactLocator)
+        /// <summary>
+        /// Find the calculation arc whose "to" attribute matches the supplied locator.
+        /// </summary>
+        /// <param name="toLocator">
+        /// The locator used to find the matching calculation arc.
+        /// </param>
+        /// <remarks>
+        /// This method will look through all calculation links, in both the document fragment itself
+        /// as well as any referenced schemas. If multiple arcs are found, then the one with the highest
+        /// priority is returned.
+        /// </remarks>
+        /// <returns>
+        /// The calculation arc referencing the supplied "to" locator. If there is no matching calculation
+        /// arc, then null will be returned.
+        /// </returns>
+        internal CalculationArc GetCalculationArc(Locator toLocator)
         {
-            if (FactLocator == null)
-                return null;
-            foreach (Item CurrentFact in this.Facts)
+            var matchingArcs = new List<CalculationArc>();
+            var docReferencedCalculationLinkbase = thisLinkbaseDocuments.CalculationLinkbase;
+            if (docReferencedCalculationLinkbase != null)
             {
-                if (CurrentFact.Name.Equals(FactLocator.HrefResourceId) == true)
-                    return CurrentFact;
+                var matchingArc = docReferencedCalculationLinkbase.GetCalculationArc(toLocator);
+                if (matchingArc != null)
+                {
+                    matchingArcs.Add(matchingArc);
+                }
             }
-            return null;
+            foreach (var currentSchema in this.Schemas)
+            {
+                var schemaCalcLinkbase = currentSchema.CalculationLinkbase;
+                if (schemaCalcLinkbase != null)
+                {
+                    var matchingArc = schemaCalcLinkbase.GetCalculationArc(toLocator);
+                    if (matchingArc != null)
+                    {
+                        matchingArcs.Add(matchingArc);
+                    }
+                }
+            }
+            return GetHighestPriorityArc(matchingArcs);
+        }
+
+        /// <summary>
+        /// Given a list of calculation arcs, find the arc with the highest priority.
+        /// </summary>
+        /// <param name="arcs">
+        /// A list of calculation arcs.
+        /// </param>
+        /// <returns>
+        /// The calculation arc with the highest priority, or null if no arc is available.
+        /// </returns>
+        private CalculationArc GetHighestPriorityArc(List<CalculationArc> arcs)
+        {
+            if (arcs.Count == 0)
+            {
+                return null;
+            }
+            if (arcs.Count == 1)
+            {
+                return arcs[0];
+            }
+            var sortedArcs = arcs.OrderBy(o => o.Priority).ToList();
+            var highestPriorityArc = sortedArcs[0];
+            for (var arcIndex = 1; arcIndex < sortedArcs.Count; arcIndex++)
+            {
+                var currentArc = sortedArcs[arcIndex];
+                if (currentArc.Priority > highestPriorityArc.Priority)
+                {
+                    if(currentArc.EquivalentTo(highestPriorityArc, this) == true)
+                    {
+                        highestPriorityArc = currentArc;
+                    }
+                }
+            }
+            return highestPriorityArc;
         }
     }
 }

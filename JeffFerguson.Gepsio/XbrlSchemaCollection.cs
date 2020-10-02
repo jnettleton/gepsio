@@ -1,9 +1,7 @@
 ﻿using JeffFerguson.Gepsio.Xml.Interfaces;
 using JeffFerguson.Gepsio.Xsd;
-using System;
+using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 
 namespace JeffFerguson.Gepsio
 {
@@ -15,7 +13,7 @@ namespace JeffFerguson.Gepsio
     /// iterate through each schema to find requested information, freeing the caller from having to iterate through
     /// multiple schemas to find information.
     /// </remarks>
-    public class XbrlSchemaCollection
+    public class XbrlSchemaCollection : IEnumerable<XbrlSchema>
     {
         internal List<XbrlSchema> SchemaList { get; private set; }
 
@@ -25,6 +23,35 @@ namespace JeffFerguson.Gepsio
         public int Count
         {
             get { return SchemaList.Count; }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="index"></param>
+        /// <returns></returns>
+        public XbrlSchema this[int index]
+        {
+            get { return SchemaList[index]; }
+            set { SchemaList.Insert(index, value); }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <returns></returns>
+        public IEnumerator<XbrlSchema> GetEnumerator()
+        {
+            return SchemaList.GetEnumerator();
+        }
+        
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <returns></returns>
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            return this.GetEnumerator();
         }
 
         internal XbrlSchemaCollection()
@@ -46,7 +73,13 @@ namespace JeffFerguson.Gepsio
         /// </param>
         internal void Add(XbrlSchema schemaToAdd)
         {
-            if (SchemaList.All(currentSchema => schemaToAdd.TargetNamespace != currentSchema.TargetNamespace))
+            var targetNamespaceAlreadyInList = false;
+            foreach (var currentSchema in SchemaList)
+            {
+                if (schemaToAdd.TargetNamespace.Equals(currentSchema.TargetNamespace) == true)
+                    targetNamespaceAlreadyInList = true;
+            }
+            if (targetNamespaceAlreadyInList == false)
                 SchemaList.Add(schemaToAdd);
         }
 
@@ -84,9 +117,25 @@ namespace JeffFerguson.Gepsio
         public Element GetElement(string elementLocalName)
         {
             var containingSchema = GetSchemaContainingElement(elementLocalName);
-            if(containingSchema == null)
-                return null;
-            return containingSchema.GetElement(elementLocalName);
+            return containingSchema?.GetElement(elementLocalName);
+        }
+
+        /// <summary>
+        /// Gets the schema having the target namespace.
+        /// </summary>
+        /// <param name="targetNamespace">
+        /// The namespace whose schema should be returned.
+        /// </param>
+        /// <param name="parentFragment">
+        /// The fragment containing the schema reference.
+        /// </param>
+        /// <returns>
+        /// A reference to the schema matching the target namespace. A null reference will be returned
+        /// if no matching schema can be found. 
+        /// </returns>
+        public XbrlSchema GetSchemaFromTargetNamespace(string targetNamespace, XbrlFragment parentFragment)
+        {
+            return FindSchema(targetNamespace);
         }
 
         /// <summary>
@@ -99,9 +148,16 @@ namespace JeffFerguson.Gepsio
         /// A reference to the schema matching the target namespace. A null reference will be returned
         /// if no matching schema can be found. 
         /// </returns>
-        public XbrlSchema GetSchemaFromTargetNamespace(string targetNamespace)
+        private XbrlSchema FindSchema(string targetNamespace)
         {
-            return SchemaList.FirstOrDefault(currentSchema => currentSchema.TargetNamespace == targetNamespace);
+            foreach (var CurrentSchema in SchemaList)
+            {
+                if (CurrentSchema.TargetNamespace.Equals(targetNamespace))
+                    return CurrentSchema;
+                if (CurrentSchema.TargetNamespaceAlias.Equals(targetNamespace))
+                    return CurrentSchema;
+            }
+            return null;
         }
 
         /// <summary>
@@ -117,12 +173,9 @@ namespace JeffFerguson.Gepsio
         internal AnyType GetNodeType(INode node)
         {
             var containingSchema = GetSchemaContainingElement(node.LocalName);
-            if (containingSchema == null)
-                return null;
-            var matchingElement = containingSchema.GetElement(node.LocalName);
-            if (matchingElement == null)
-                return null;
-            return AnyType.CreateType(matchingElement.TypeName.Name, containingSchema);
+            var matchingElement = containingSchema?.GetElement(node.LocalName);
+
+            return matchingElement == null ? null : AnyType.CreateType(matchingElement.TypeName.Name, containingSchema);
         }
 
         /// <summary>
@@ -141,7 +194,9 @@ namespace JeffFerguson.Gepsio
             {
                 var matchingAttributeType = CurrentSchema.GetAttributeType(attribute);
                 if (matchingAttributeType != null)
+                {
                     return matchingAttributeType;
+                }
             }
             return null;
         }
